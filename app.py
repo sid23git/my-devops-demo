@@ -94,8 +94,8 @@ def metrics():
         import resource  # Unix-only
         mem_usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     except ImportError:
-        # Fallback for Windows — report object count as a proxy
-        mem_usage = len(gc.get_objects()) if "gc" in dir() else "N/A"
+        # Fallback for Windows
+        mem_usage = "N/A (not available on Windows)"
 
     return jsonify({
         "requests_served": REQUEST_COUNT,
