@@ -1,0 +1,36 @@
+# Version control
+.git
+.gitignore
+
+# CI/CD
+.github
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.coverage
+htmlcov
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation
+README.md
+LICENSE
+*.md
+
+# Dev files
+Makefile
+.flake8
+requirements-dev.txt
+test_app.py

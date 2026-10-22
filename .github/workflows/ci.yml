@@ -1,4 +1,22 @@
-name: CI/CD Pipeline
+# ═══════════════════════════════════════════════════════════════════
+#  CI/CD Pipeline — DevSecOps with Quality Gates
+# ═══════════════════════════════════════════════════════════════════
+#  Pipeline Flow:
+#    Lint → Test (matrix) → Security Scan → Build & Push → Container Scan
+#  
+#  DevOps Concepts Demonstrated:
+#    • Code Quality Gates (flake8)
+#    • Matrix Testing (Python 3.10, 3.11, 3.12)
+#    • Test Coverage Enforcement (≥80%)
+#    • Static Application Security Testing — SAST (bandit)
+#    • Dependency Caching (pip)
+#    • Multi-stage Docker Build
+#    • Semantic Versioning (SHA + date tags)
+#    • Container Vulnerability Scanning (trivy)
+#    • Environment-based Deployment Stages
+# ═══════════════════════════════════════════════════════════════════
+
+name: CI/CD Pipeline — DevSecOps
 
 on:
   push:
@@ -6,47 +24,173 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
 jobs:
-  # ── Job 1: Run Tests ──────────────────────────────────────────
-  test:
-    name: ✅ Run Tests
+
+  # ── Stage 1: Code Quality ────────────────────────────────────
+  lint:
+    name: 🔍 Lint — Code Quality
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-dev.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
-      - name: Run tests with pytest
-        run: pytest test_app.py -v
+      - name: Install linting tools
+        run: pip install flake8==7.0.0
 
-  # ── Job 2: Build & Push Docker Image (only if tests pass) ─────
-  build-and-push:
-    name: 🐳 Build & Push Docker Image
+      - name: Run flake8 linter
+        run: flake8 app.py config.py --max-line-length=120 --statistics
+
+  # ── Stage 2: Testing (Matrix Strategy) ──────────────────────
+  test:
+    name: ✅ Test — Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    needs: test        # This job waits for 'test' to succeed first
+    needs: lint   # Tests only run after lint passes
+
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('requirements-dev.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest test_app.py -v \
+            --cov=app \
+            --cov-report=term-missing \
+            --cov-fail-under=80
+
+      - name: Upload coverage results
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: .coverage
+          retention-days: 5
+
+  # ── Stage 3: Security Scanning (SAST) ───────────────────────
+  security:
+    name: 🔒 Security — SAST Scan
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install bandit
+        run: pip install bandit==1.7.7
+
+      - name: Run bandit security scan
+        run: |
+          echo "🔒 Running SAST (Static Application Security Testing)..."
+          bandit -r app.py config.py -f screen -ll
+
+  # ── Stage 4: Build & Push Docker Image ──────────────────────
+  build-and-push:
+    name: 🐳 Build & Push Image
+    runs-on: ubuntu-latest
+    needs: [test, security]   # Must pass BOTH tests AND security
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract metadata for tagging
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value={{date 'YYYYMMDD'}}-{{sha}}
+
       - name: Build and push Docker image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
-          tags: ghcr.io/${{ github.repository }}:latest
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Stage 5: Container Vulnerability Scan ───────────────────
+  container-scan:
+    name: 🛡️ Scan — Container Vulnerabilities
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+
+      - name: Scan passed
+        if: success()
+        run: echo "✅ No CRITICAL or HIGH vulnerabilities found!"
