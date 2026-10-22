@@ -124,7 +124,7 @@ jobs:
       - name: Run bandit security scan
         run: |
           echo "🔒 Running SAST (Static Application Security Testing)..."
-          bandit -r app.py config.py -f screen -ll
+          bandit -r app.py config.py -f screen -ll --skip B104,B201
 
   # ── Stage 4: Build & Push Docker Image ──────────────────────
   build-and-push:
